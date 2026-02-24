@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="bg-gray-50">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>简易流式AI对话</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 自定义滚动条（可选） */
+        #chat-container::-webkit-scrollbar {
+          width: 6px;
+        }
+        #chat-container::-webkit-scrollbar-thumb {
+          background-color: #9ca3af;
+          border-radius: 3px;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+<!-- 头部 -->
+<header class="bg-white border-b shadow-sm">
+    <div class="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
+        <h1 class="text-xl font-bold text-gray-800">流式 AI 对话</h1>
+        <div class="text-sm text-gray-500">
+            deepseek-r1:1.5b / ollama
+        </div>
+    </div>
+</header>
+
+<!-- 聊天主区域 -->
+<main class="flex-1 flex flex-col max-w-5xl mx-auto w-full px-4 py-6">
+    <div id="chat-container" class="flex-1 overflow-y-auto pr-2 space-y-6 pb-6 scroll-smooth">
+        <!-- 欢迎消息 -->
+        <div class="flex items-start gap-4">
+            <div class="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold shrink-0">
+                AI
+            </div>
+            <div class="bg-white rounded-2xl rounded-tl-none px-5 py-3.5 shadow-sm max-w-3xl">
+                <p class="text-gray-800">你好！请告诉我您的问题～</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 输入区域 -->
+    <div class="bg-white border-t pt-4 sticky bottom-0">
+        <form id="chat-form" class="flex gap-3 max-w-4xl mx-auto">
+            <input
+                    id="message-input"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="输入消息... (Shift + Enter 换行)"
+                    class="flex-1 px-5 py-3.5 border border-gray-300 rounded-full focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 shadow-sm"
+            />
+            <button
+                    type="submit"
+                    class="px-7 py-3.5 bg-indigo-600 text-white font-medium rounded-full hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    id="send-btn"
+            >
+                发送
+            </button>
+        </form>
+        <p class="text-xs text-center text-gray-400 mt-2">
+            正在使用流式响应 • 模型：deepseek-r1:1.5b
+        </p>
+    </div>
+</main>
+
+<script>
+    const chatContainer = document.getElementById('chat-container');
+    const form = document.getElementById('chat-form');
+    const input = document.getElementById('message-input');
+    const sendBtn = document.getElementById('send-btn');
+
+    let currentAssistantMessage = null;
+    let currentTextNode = null;
+    let eventSource = null;
+
+    // 添加一条消息（用户或AI）
+    function addMessage(content, isUser = false) {
+      const div = document.createElement('div');
+      div.className = `flex items-start gap-4 ${isUser ? 'justify-end' : ''}`;
+
+      const avatar = isUser
+        ? `<div class="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold shrink-0">你</div>`
+        : `<div class="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold shrink-0">AI</div>`;
+
+      const bubbleClass = isUser
+        ? 'bg-blue-600 text-white rounded-2xl rounded-tr-none'
+        : 'bg-white rounded-2xl rounded-tl-none shadow-sm';
+
+      div.innerHTML = `
+        ${isUser ? '' : avatar}
+        <div class="${bubbleClass} px-5 py-3.5 max-w-3xl">
+          <div class="whitespace-pre-wrap break-words">${content}</div>
+        </div>
+        ${isUser ? avatar : ''}
+      `;
+
+      chatContainer.appendChild(div);
+      chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' });
+      return div;
+    }
+
+    // 创建一个空的AI回复气泡（流式会追加到这里）
+    function createStreamingMessage() {
+      const div = document.createElement('div');
+      div.className = `flex items-start gap-4`;
+      div.innerHTML = `
+        <div class="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold shrink-0">AI</div>
+        <div class="bg-white rounded-2xl rounded-tl-none px-5 py-3.5 shadow-sm max-w-3xl">
+          <div class="whitespace-pre-wrap break-words text-gray-800 min-h-[1.5rem]"></div>
+        </div>
+      `;
+      chatContainer.appendChild(div);
+      chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' });
+      return div.querySelector('.whitespace-pre-wrap');
+    }
+
+    // 发送消息
+    function sendMessage() {
+      const message = input.value.trim();
+      if (!message) return;
+
+      // 显示用户消息
+      addMessage(message, true);
+      input.value = '';
+      sendBtn.disabled = true;
+
+      // 创建空的AI回复容器
+      currentTextNode = createStreamingMessage();
+      currentAssistantMessage = '';
+
+      const params = new URLSearchParams({
+        model: 'deepseek-r1:1.5b',
+        message: message
+      });
+
+     const apiUrl = `http://localhost:8090/api/v1/ollama/generate_stream?${params.toString()}`;
+
+      // 关闭之前的连接（防止重复）
+      if (eventSource) {
+        eventSource.close();
+      }
+
+      eventSource = new EventSource(apiUrl);
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          const content = data?.result?.output?.content || '';
+
+          if (content) {
+            currentAssistantMessage += content;
+            currentTextNode.textContent = currentAssistantMessage;
+            chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'auto' });
+          }
+
+          // 判断是否结束
+          const finishReason = data?.result?.metadata?.finishReason;
+          if (finishReason === 'STOP') {
+            eventSource.close();
+            eventSource = null;
+            sendBtn.disabled = false;
+            input.focus();
+          }
+        } catch (err) {
+          console.error('解析错误:', err, event.data);
+        }
+      };
+
+      eventSource.onerror = (err) => {
+        console.error('EventSource 错误:', err);
+        currentTextNode.textContent += '\n\n（连接中断或发生错误）';
+        sendBtn.disabled = false;
+        eventSource.close();
+        eventSource = null;
+      };
+    }
+
+    // 表单提交
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      sendMessage();
+    });
+
+    // 支持 Shift + Enter 换行，Enter 发送
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    // 页面加载后自动聚焦输入框
+    input.focus();
+</script>
+</body>
+</html>
